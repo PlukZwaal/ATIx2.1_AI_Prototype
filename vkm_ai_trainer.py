@@ -27,6 +27,9 @@ df = pd.read_csv('Opgeschoonde_VKM_dataset.csv')
 print(f"✓ Dataset geladen: {df.shape[0]} modules, {df.shape[1]} features")
 print(f"✓ Kolommen: {', '.join(df.columns[:10])}...")
 
+# Zorg dat alle rijen exact aligned zijn met similarity matrix
+df.reset_index(drop=True, inplace=True)
+
 # 2. FEATURE ENGINEERING
 print("\n[STAP 2] Feature Engineering...")
 
@@ -43,13 +46,17 @@ df['combined_text'] = (
 numeric_features = ['studycredit', 'interests_match_score', 'popularity_score', 
                    'estimated_difficulty', 'available_spots']
 
-scaler = StandardScaler()
+from sklearn.preprocessing import MinMaxScaler
+scaler = MinMaxScaler()
+
 df_numeric = df[numeric_features].fillna(df[numeric_features].mean())
 df_numeric_scaled = pd.DataFrame(
     scaler.fit_transform(df_numeric),
     columns=[f'{col}_scaled' for col in numeric_features]
 )
 
+for col in numeric_features:
+    df[f'{col}_normalized'] = df_numeric_scaled[f'{col}_scaled'].values
 print(f"✓ Combined text feature aangemaakt")
 print(f"✓ {len(numeric_features)} numerieke features genormaliseerd")
 
@@ -81,7 +88,7 @@ print(f"✓ Vocabulaire grootte: {len(tfidf.vocabulary_)} unieke termen")
 # 4. DIMENSIONALITY REDUCTION
 print("\n[STAP 4] Dimensionaliteitsreductie met SVD...")
 
-svd = TruncatedSVD(n_components=50, random_state=42)
+svd = TruncatedSVD(n_components=120, random_state=42)
 tfidf_reduced = svd.fit_transform(tfidf_matrix)
 
 print(f"✓ TF-IDF gereduceerd van {tfidf_matrix.shape[1]} naar {tfidf_reduced.shape[1]} dimensies")

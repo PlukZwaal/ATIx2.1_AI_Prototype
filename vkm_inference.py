@@ -70,60 +70,80 @@ class VKMRecommender:
     def get_recommendations_by_profile(self, student_profile, top_n=5):
         """
         Krijg aanbevelingen op basis van student profiel
-        
+
         Parameters:
         -----------
         student_profile : dict
             {'interests': ['data', 'ai'], 'preferred_difficulty': 3, 'level': 'B'}
         """
-        # Bereken match scores
-        scores = np.zeros(len(self.df))
-        
-        # Interest matching (text similarity)
-        if 'interests' in student_profile:
-            interest_text = ' '.join(student_profile['interests']).lower()
-            for idx, row in self.df.iterrows():
-                combined = str(row.get('combined_text', ''))
-                # Simple keyword matching
-                match_count = sum(1 for interest in student_profile['interests'] 
-                                if interest.lower() in combined.lower())
-                scores[idx] += match_count * 2
-        
-        # Difficulty matching
+        eps = 1e-8
+        n = len(self.df)
+        scores = np.zeros(n)
+
+        # Interest matching (keyword counts)
+        interest_counts = np.zeros(n, dtype=float)
+        if 'interests' in student_profile and student_profile['interests']:
+            interests = [s.lower() for s in student_profile['interests']]
+            for idx, combined in enumerate(self.df['combined_text'].fillna('').astype(str)):
+                cnt = sum(1 for it in interests if it in combined.lower())
+                interest_counts[idx] = cnt
+        # normalize interest counts 0-1
+        ic_min, ic_max = interest_counts.min(), interest_counts.max()
+        if ic_max - ic_min > 0:
+            ic_norm = (interest_counts - ic_min) / (ic_max - ic_min + eps)
+        else:
+            ic_norm = interest_counts  # all zeros
+        scores += ic_norm * 2.0  # weight for keyword matches (adjustable)
+
+        # Difficulty matching (already roughly 0-1)
         if 'preferred_difficulty' in student_profile:
             pref_diff = student_profile['preferred_difficulty']
-            diff_scores = 1 - np.abs(self.df['estimated_difficulty'].values - pref_diff) / 5
-            scores += diff_scores
-        
+            diff_scores = 1 - np.abs(self.df['estimated_difficulty'].fillna(pref_diff).values - pref_diff) / 5
+            diff_scores = np.clip(diff_scores, 0, 1)
+            scores += diff_scores * 1.0
+
         # Level matching
         if 'level' in student_profile:
-            level_match = (self.df['level'] == student_profile['level']).astype(int)
+            level_match = (self.df['level'] == student_profile['level']).astype(int).values
             scores += level_match * 1.5
-        
-        # Interest match score
-        scores += self.df['interests_match_score'].values * 0.5
-        
-        # Popularity bonus
-        scores += self.df['popularity_score'].values * 0.3
-        
+
+        # Normalize stored interest-match and popularity to 0-1 (global scale)
+        pop = self.df['popularity_score'].fillna(0).astype(float).values
+        pop_min, pop_max = pop.min(), pop.max()
+        pop_norm = (pop - pop_min) / (pop_max - pop_min + eps)
+
+        ims = self.df['interests_match_score'].fillna(0).astype(float).values
+        ims_min, ims_max = ims.min(), ims.max()
+        ims_norm = (ims - ims_min) / (ims_max - ims_min + eps)
+
+        # Add normalized contributions with original weights
+        scores += ims_norm * 0.5
+        scores += pop_norm * 0.3
+
         # Get top N
         top_indices = scores.argsort()[-top_n:][::-1]
-        
+
         results = self.df.iloc[top_indices].copy()
         results['match_score'] = scores[top_indices]
-        
+
         return results
     
+
     def get_cluster_recommendations(self, cluster_id, top_n=5):
-        """Krijg top modules uit een specifiek cluster"""
-        cluster_modules = self.df[self.df['cluster'] == cluster_id]
+        """Krijg top modules uit een specifiek cluster (met normalisatie)"""
+        cluster_modules = self.df[self.df['cluster'] == cluster_id].copy()
         
-        # Sorteer op populariteit en interest match
-        cluster_modules = cluster_modules.copy()
-        cluster_modules['score'] = (
-            cluster_modules['popularity_score'] * 0.5 + 
-            cluster_modules['interests_match_score'] * 0.5
-        )
+        eps = 1e-8
+        pop_min = self.df['popularity_score'].min()
+        pop_max = self.df['popularity_score'].max()
+        int_min = self.df['interests_match_score'].min()
+        int_max = self.df['interests_match_score'].max()
+        
+        cluster_modules['pop_norm'] = (cluster_modules['popularity_score'] - pop_min) / (pop_max - pop_min + eps)
+        cluster_modules['int_norm'] = (cluster_modules['interests_match_score'] - int_min) / (int_max - int_min + eps)
+        
+        # Gewichten toepassen (aanpasbaar)
+        cluster_modules['score'] = cluster_modules['pop_norm'] * 0.5 + cluster_modules['int_norm'] * 0.5
         
         return cluster_modules.nlargest(top_n, 'score')
 
@@ -166,7 +186,7 @@ print("=" * 80)
 student_profile = {
     'interests': ['data', 'analyse', 'machine learning', 'AI'],
     'preferred_difficulty': 3,
-    'level': 'B'
+    'level': 'NLQF5'
 }
 
 print(f"\n Student Profiel:")
