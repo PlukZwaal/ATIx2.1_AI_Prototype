@@ -3,13 +3,12 @@ import numpy as np
 import nltk
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.decomposition import TruncatedSVD
+from sklearn.preprocessing import MinMaxScaler
 import pickle
 import warnings
 warnings.filterwarnings('ignore')
 
-# Download de benodigde NLTK data (voor stopwoorden) als deze nog niet aanwezig is.
+# Download NLTK data
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
@@ -17,25 +16,19 @@ except LookupError:
     nltk.download('stopwords', quiet=True)
 
 print("=" * 80)
-print("VKM SMART STUDY COACH - AI MODEL TRAINING")
+print("VKM SMART STUDY COACH - STUDENT-TO-MODULE AI MODEL")
 print("=" * 80)
 
-# STAP 1: DATA LADEN EN VOORBEREIDEN
-print("\n[STAP 1] Data laden en voorbereiden...")
+# STAP 1: DATA LADEN
+print("\n[STAP 1] Data laden...")
 df = pd.read_csv('Opgeschoonde_VKM_dataset.csv')
-
-print(f"Dataset geladen: {df.shape[0]} modules, {df.shape[1]} kolommen")
-print(f"Kolommen: {', '.join(df.columns[:10])}...")
-
-# Reset de index om zeker te zijn dat de rijen overeenkomen met de latere similarity matrix.
+print(f"Dataset geladen: {df.shape[0]} modules")
 df.reset_index(drop=True, inplace=True)
 
-# STAP 2: FEATURE ENGINEERING (KENMERKEN CREËREN)
-# In deze stap maken we de data geschikt voor het model door nieuwe, betekenisvolle kolommen (features) te creëren.
+# STAP 2: FEATURE ENGINEERING
 print("\n[STAP 2] Feature Engineering...")
 
-# We combineren alle relevante tekstkolommen tot één grote tekst per module.
-# Dit geeft het model de volledige context om modules te kunnen vergelijken.
+# Combineer alle tekstkolommen
 df['combined_text'] = (
     df['name'].fillna('') + ' ' + 
     df['shortdescription'].fillna('') + ' ' + 
@@ -44,179 +37,184 @@ df['combined_text'] = (
     df['module_tags'].fillna('')
 ).str.lower()
 
-# Numerieke kolommen worden genormaliseerd. Dit betekent dat we ze allemaal op dezelfde schaal (0 tot 1) brengen.
-# Dit voorkomt dat een kolom met grote getallen (zoals studycredit) meer invloed heeft dan een kolom met kleine getallen.
+# Normaliseer numerieke features
 numeric_features = ['studycredit', 'interests_match_score', 'popularity_score', 
                    'estimated_difficulty', 'available_spots']
-
 scaler = MinMaxScaler()
 df_numeric = df[numeric_features].fillna(df[numeric_features].mean())
-df_numeric_scaled = pd.DataFrame(
-    scaler.fit_transform(df_numeric),
-    columns=[f'{col}_scaled' for col in numeric_features]
-)
+df_numeric_scaled = scaler.fit_transform(df_numeric)
 
-for col in numeric_features:
-    df[f'{col}_normalized'] = df_numeric_scaled[f'{col}_scaled'].values
-print(f"'combined_text' kolom aangemaakt voor tekstanalyse.")
-print(f"{len(numeric_features)} numerieke kolommen genormaliseerd (schaal 0-1).")
+for i, col in enumerate(numeric_features):
+    df[f'{col}_normalized'] = df_numeric_scaled[:, i]
 
-# STAP 3: TEKST OMZETTEN NAAR GETALLEN (TF-IDF VECTORIZATION)
-# Een AI-model kan geen tekst lezen, dus we zetten de 'combined_text' om in een matrix van getallen.
-print("\n[STAP 3] Tekst omzetten naar getallen met TF-IDF...")
+print(f"Combined text kolom aangemaakt")
+print(f"{len(numeric_features)} numerieke kolommen genormaliseerd")
 
-# We gebruiken de Nederlandse stopwoordenlijst van NLTK om veelvoorkomende, niet-betekenisvolle woorden te negeren.
+# STAP 3: TF-IDF VECTORIZATION (dit is de KERN van de recommender!)
+print("\n[STAP 3] TF-IDF Vectorization - DRIE VARIANTEN TESTEN...")
+
 from nltk.corpus import stopwords
-try:
-    nl_stopwords = stopwords.words('dutch')
-except LookupError:
-    nltk.download('stopwords', quiet=True)
-    nl_stopwords = stopwords.words('dutch')
+nl_stopwords = stopwords.words('dutch')
 
-# TF-IDF geeft een score aan elk woord, gebaseerd op hoe uniek en belangrijk het is voor een specifieke module.
-tfidf = TfidfVectorizer(
-    max_features=500,      # Beperk tot de 500 meest belangrijke woorden.
-    ngram_range=(1, 2),    # Kijk naar losse woorden én combinaties van twee woorden (bv. "machine learning").
-    min_df=2,              # Een woord moet in minimaal 2 modules voorkomen.
-    max_df=0.8,            # Een woord mag in maximaal 80% van de modules voorkomen (filtert te algemene woorden).
-    stop_words=nl_stopwords # Gebruik de Nederlandse stopwoordenlijst.
+# VARIANT 1: Baseline (met bigrams, 3000 features, met stopwoorden)
+print("\n VARIANT 1: Baseline (bigrams, 3000 features, met stopwoorden)")
+tfidf_v1 = TfidfVectorizer(
+    max_features=3000,
+    ngram_range=(1, 2),
+    min_df=2,
+    max_df=0.8,
+    stop_words=nl_stopwords
 )
+tfidf_matrix_v1 = tfidf_v1.fit_transform(df['combined_text'])
+print(f"  TF-IDF matrix: {tfidf_matrix_v1.shape}")
+print(f"  Vocabulair: {len(tfidf_v1.vocabulary_)} termen")
+print(f"  Sparsity: {(1.0 - tfidf_matrix_v1.nnz / (tfidf_matrix_v1.shape[0] * tfidf_matrix_v1.shape[1])):.2%}")
 
-tfidf_matrix = tfidf.fit_transform(df['combined_text'])
-print(f"TF-IDF matrix aangemaakt: {tfidf_matrix.shape}")
-print(f"Grootte van het vocabulair: {len(tfidf.vocabulary_)} unieke termen")
+# VARIANT 2: Alleen unigrams, 6000 features
+print("\n VARIANT 2: Unigrams only, 6000 features, met stopwoorden")
+tfidf_v2 = TfidfVectorizer(
+    max_features=6000,
+    ngram_range=(1, 1),  # Alleen losse woorden
+    min_df=2,
+    max_df=0.8,
+    stop_words=nl_stopwords
+)
+tfidf_matrix_v2 = tfidf_v2.fit_transform(df['combined_text'])
+print(f"  TF-IDF matrix: {tfidf_matrix_v2.shape}")
+print(f"  Vocabulair: {len(tfidf_v2.vocabulary_)} termen")
+print(f"  Sparsity: {(1.0 - tfidf_matrix_v2.nnz / (tfidf_matrix_v2.shape[0] * tfidf_matrix_v2.shape[1])):.2%}")
 
-# STAP 4: DIMENSIONALITEITSREDUCTIE MET SVD
-# De TF-IDF matrix is erg groot. Met SVD reduceren we het aantal dimensies om ruis te verminderen en de berekeningen te versnellen.
-print("\n[STAP 4] Dimensionaliteit reduceren met SVD...")
+# VARIANT 3: Bigrams, 3000 features, ZONDER stopwoorden
+print("\n VARIANT 3: Bigrams, 3000 features, ZONDER stopwoorden")
+tfidf_v3 = TfidfVectorizer(
+    max_features=3000,
+    ngram_range=(1, 2),
+    min_df=2,
+    max_df=0.8,
+    stop_words=None  # Geen stopwoorden
+)
+tfidf_matrix_v3 = tfidf_v3.fit_transform(df['combined_text'])
+print(f"  TF-IDF matrix: {tfidf_matrix_v3.shape}")
+print(f"  Vocabulair: {len(tfidf_v3.vocabulary_)} termen")
+print(f"  Sparsity: {(1.0 - tfidf_matrix_v3.nnz / (tfidf_matrix_v3.shape[0] * tfidf_matrix_v3.shape[1])):.2%}")
 
-svd = TruncatedSVD(n_components=120, random_state=42)
-tfidf_reduced = svd.fit_transform(tfidf_matrix)
+# STAP 4: VALIDATIE - TEST MET EEN VOORBEELD STUDENTPROFIEL
+print("\n[STAP 4] Validatie - Test met studentprofiel...")
 
-print(f"Aantal dimensies gereduceerd van {tfidf_matrix.shape[1]} naar {tfidf_reduced.shape[1]}")
-print(f"Verklaarde variantie door de nieuwe dimensies: {svd.explained_variance_ratio_.sum():.2%}")
+test_student_text = "Ik ben geïnteresseerd in data analyse machine learning AI kunstmatige intelligentie programmeren python"
 
-# STAP 5: FEATURES COMBINEREN
-# We voegen de gereduceerde tekst-features en de genormaliseerde numerieke features samen tot één finale feature matrix.
-print("\n[STAP 5] Features combineren...")
+print(f"\nTest studentprofiel: '{test_student_text}'")
 
-# We geven de tekst-features een iets zwaarder gewicht omdat de inhoud het belangrijkst is voor de aanbeveling.
-TEXT_WEIGHT = 0.6
-NUMERIC_WEIGHT = 0.4
+for variant_num, (tfidf_model, tfidf_matrix) in enumerate([
+    (tfidf_v1, tfidf_matrix_v1),
+    (tfidf_v2, tfidf_matrix_v2),
+    (tfidf_v3, tfidf_matrix_v3)
+], 1):
+    print(f"\n--- VARIANT {variant_num} RESULTATEN ---")
+    
+    # Vectoriseer het studentprofiel met DEZELFDE vectorizer
+    student_vector = tfidf_model.transform([test_student_text])
+    
+    # Bereken cosine similarity tussen student en alle modules
+    similarities = cosine_similarity(student_vector, tfidf_matrix)[0]
+    
+    # Haal top 3 modules op
+    top_indices = similarities.argsort()[-3:][::-1]
+    
+    print(f"Top 3 aanbevelingen:")
+    for rank, idx in enumerate(top_indices, 1):
+        print(f"  {rank}. {df.iloc[idx]['name']}")
+        print(f"     Similarity: {similarities[idx]:.3f} | Level: {df.iloc[idx]['level']} | Credits: {df.iloc[idx]['studycredit']}")
 
-combined_features = np.hstack([
-    tfidf_reduced * TEXT_WEIGHT,
-    df_numeric_scaled.values * NUMERIC_WEIGHT
-])
+# STAP 5: DIMENSIONALITEITSREDUCTIE MET SVD
+print("\n[STAP 5] Dimensionaliteitsreductie met SVD...")
 
-print(f"Finale feature matrix aangemaakt: {combined_features.shape}")
-print(f"  - Tekst-features: {tfidf_reduced.shape[1]} (gewicht: {TEXT_WEIGHT})")
-print(f"  - Numerieke features: {df_numeric_scaled.shape[1]} (gewicht: {NUMERIC_WEIGHT})")
+from sklearn.decomposition import TruncatedSVD
 
-# STAP 6: GELIJKENIS-MATRIX BEREKENEN (SIMILARITY MATRIX)
-# We berekenen voor elke module hoe veel deze lijkt op elke andere module.
-print("\n[STAP 6] Similarity matrix berekenen...")
+# Kies Variant 1 als beste (bigrams werken goed voor Nederlandse tekst)
+chosen_tfidf = tfidf_v1
+chosen_matrix = tfidf_matrix_v1
 
-# Cosine similarity berekent de hoek tussen twee vectoren; een kleine hoek (score dicht bij 1) betekent veel gelijkenis.
-similarity_matrix = cosine_similarity(combined_features)
-print(f"Similarity matrix aangemaakt: {similarity_matrix.shape}")
-print(f"Gemiddelde gelijkenis: {similarity_matrix.mean():.3f}")
+print("\nGekozen: VARIANT 1 (bigrams, 3000 features, met stopwoorden)")
+print("Reden: Goede balans tussen detail (bigrams) en efficiency (3000 features)")
 
-# STAP 7: MODULES CLUSTEREN
-# We groeperen de modules in clusters op basis van hun gecombineerde features.
-print("\n[STAP 7] Modules clusteren met KMeans...")
+# Pas SVD toe om dimensies te reduceren en ruis te verminderen
+# We reduceren van 3000 naar 200 dimensies
+svd = TruncatedSVD(n_components=200, random_state=42)
+tfidf_reduced = svd.fit_transform(chosen_matrix)
 
-from sklearn.cluster import KMeans
+print(f"\nSVD toegepast:")
+print(f"  Originele dimensies: {chosen_matrix.shape[1]}")
+print(f"  Gereduceerde dimensies: {tfidf_reduced.shape[1]}")
+print(f"  Verklaarde variantie: {svd.explained_variance_ratio_.sum():.2%}")
+print(f"  Reductie: {(1 - tfidf_reduced.shape[1]/chosen_matrix.shape[1])*100:.1f}%")
 
-kmeans = KMeans(n_clusters=8, random_state=42, n_init=10)
-df['cluster'] = kmeans.fit_predict(combined_features)
+# Test: vergelijk aanbevelingen met en zonder SVD
+print("\n Vergelijking: Origineel vs SVD-gereduceerd")
+test_text = "Ik ben geïnteresseerd in data analyse machine learning"
+student_vec_original = chosen_tfidf.transform([test_text])
+student_vec_reduced = svd.transform(student_vec_original)
 
-print(f"{len(df['cluster'].unique())} clusters geïdentificeerd.")
-print("\nVerdeling van modules over de clusters:")
-for cluster_id in sorted(df['cluster'].unique()):
-    count = (df['cluster'] == cluster_id).sum()
-    print(f"  Cluster {cluster_id}: {count} modules ({count/len(df)*100:.1f}%)")
+# Similarities zonder SVD
+sim_original = cosine_similarity(student_vec_original, chosen_matrix)[0]
+top_original = sim_original.argsort()[-3:][::-1]
 
-# STAP 8: MODELVALIDATIE (SNELLE CONTROLE)
-# Een simpele test om te zien of het model logische aanbevelingen geeft.
-print("\n[STAP 8] Model validatie (steekproef)...")
+# Similarities met SVD
+sim_reduced = cosine_similarity(student_vec_reduced, tfidf_reduced)[0]
+top_reduced = sim_reduced.argsort()[-3:][::-1]
 
-test_idx = np.random.randint(0, len(df))
-test_module = df.iloc[test_idx]
+print("\nTop 3 zonder SVD:")
+for i, idx in enumerate(top_original, 1):
+    print(f"  {i}. {df.iloc[idx]['name']} (score: {sim_original[idx]:.3f})")
 
-similarities = similarity_matrix[test_idx]
-top_similar_indices = similarities.argsort()[-6:][::-1][1:]  # Top 5, exclusief de module zelf
+print("\nTop 3 met SVD:")
+for i, idx in enumerate(top_reduced, 1):
+    print(f"  {i}. {df.iloc[idx]['name']} (score: {sim_reduced[idx]:.3f})")
 
-print(f"\nTestmodule: '{test_module['name']}'")
-print(f"Niveau: {test_module['level']}, Studiepunten: {test_module['studycredit']}")
-print(f"\nTop 5 meest vergelijkbare modules volgens het model:")
-for rank, idx in enumerate(top_similar_indices, 1):
-    sim_module = df.iloc[idx]
-    print(f"  {rank}. {sim_module['name']}")
-    print(f"     Gelijkenis-score: {similarities[idx]:.3f} | Niveau: {sim_module['level']} | Studiepunten: {sim_module['studycredit']}")
+# STAP 6: MODEL OPSLAAN
+print("\n[STAP 6] Model opslaan...")
 
-# STAP 9: MODEL OPSLAAN (PERSISTENCE)
-# We slaan alle getrainde componenten (het 'brein' van de AI) op in een .pkl-bestand.
-print("\n[STAP 9] Model en andere componenten opslaan...")
-
-# Zorg dat er een 'module_id' kolom is voor de herkenbaarheid.
+# Voeg module_id toe indien nodig
 if 'module_id' not in df.columns:
     df.insert(0, 'module_id', range(1, len(df) + 1))
-    print("INFO: 'module_id' niet gevonden, fallback 'module_id' (1..N) toegevoegd.")
 
-# Selecteer de kolommen die we in het uiteindelijke model willen bewaren.
-desired_cols = ['module_id', 'name', 'level', 'studycredit',
-                'interests_match_score', 'popularity_score',
-                'estimated_difficulty', 'location', 'cluster']
-available_cols = [c for c in desired_cols if c in df.columns]
-missing = [c for c in desired_cols if c not in available_cols]
-if missing:
-    print(f"WAARSCHUWING: De volgende kolommen ontbreken en worden overgeslagen: {missing}")
+# Bewaar alleen essentiële kolommen
+essential_cols = ['module_id', 'name', 'level', 'studycredit', 'shortdescription',
+                  'interests_match_score', 'popularity_score', 'estimated_difficulty', 
+                  'location', 'combined_text']
+available_cols = [c for c in essential_cols if c in df.columns]
 
-# Bundel alle onderdelen van het model in een dictionary.
+# Bundel model artifacts
 model_artifacts = {
-    'tfidf_vectorizer': tfidf,
-    'svd_model': svd,
+    'tfidf_vectorizer': chosen_tfidf,
+    'tfidf_matrix': chosen_matrix,
     'scaler': scaler,
-    'similarity_matrix': similarity_matrix,
-    'kmeans_model': kmeans,
     'feature_columns': numeric_features,
-    'text_weight': TEXT_WEIGHT,
-    'numeric_weight': NUMERIC_WEIGHT,
-    'dataframe': df[available_cols].copy()
+    'dataframe': df[available_cols].copy(),
+    'model_version': 'student-to-module-v1',
+    'tuning_notes': {
+        'variant_1': 'bigrams, 3000 features, stopwoorden - GEKOZEN',
+        'variant_2': 'unigrams, 6000 features - te generiek',
+        'variant_3': 'bigrams, geen stopwoorden - te veel ruis'
+    }
 }
 
-with open('vkm_recommender_model.pkl', 'wb') as f:
+with open('vkm_student_recommender_model.pkl', 'wb') as f:
     pickle.dump(model_artifacts, f)
 
-print("Model-componenten opgeslagen in 'vkm_recommender_model.pkl'")
+print("\nModel opgeslagen: 'vkm_student_recommender_model.pkl'")
 
-# Sla de verwerkte dataset op, inclusief de nieuwe cluster-informatie.
-df.to_csv('VKM_processed_with_clusters.csv', index=False)
-print("Verwerkte dataset opgeslagen in 'VKM_processed_with_clusters.csv'")
+# STAP 6: MODEL STATISTIEKEN
+print("\n[STAP 6] Model statistieken...")
 
-# STAP 10: MODELSTATISTIEKEN EN INZICHTEN
-# Een kijkje in wat het model heeft geleerd.
-print("\n[STAP 10] Model statistieken en inzichten...")
-
-print("\n Belangrijkste termen (Top 10 TF-IDF woorden):")
-feature_names = tfidf.get_feature_names_out()
-tfidf_scores = tfidf_matrix.sum(axis=0).A1
+print("\nTop 10 belangrijkste termen in vocabulair:")
+feature_names = chosen_tfidf.get_feature_names_out()
+tfidf_scores = chosen_matrix.sum(axis=0).A1
 top_indices = tfidf_scores.argsort()[-10:][::-1]
 for idx in top_indices:
     print(f"  - {feature_names[idx]}: {tfidf_scores[idx]:.2f}")
 
-print("\n Clusterkarakteristieken:")
-for cluster_id in sorted(df['cluster'].unique()):
-    cluster_modules = df[df['cluster'] == cluster_id]
-    print(f"\nCluster {cluster_id} ({len(cluster_modules)} modules):")
-    print(f"  Gemiddelde moeilijkheid: {cluster_modules['estimated_difficulty'].mean():.2f}")
-    print(f"  Gemiddelde populariteit: {cluster_modules['popularity_score'].mean():.2f}")
-    print(f"  Meest voorkomend niveau: {cluster_modules['level'].mode()[0]}")
-    print(f"  Voorbeeldmodules: {', '.join(cluster_modules['name'].head(3).tolist())}")
-
 print("\n" + "=" * 80)
-print(" AI MODEL TRAINING VOLTOOID")
+print("STUDENT-TO-MODULE MODEL TRAINING VOLTOOID")
 print("=" * 80)
-print("\nHet model is getraind en klaar voor gebruik in 'vkm_inference.py'.")
-print("Gebruik het model met: pickle.load(open('vkm_recommender_model.pkl', 'rb'))")
+print("\nDit model kan nu studenten matchen met modules op basis van hun interesses!")

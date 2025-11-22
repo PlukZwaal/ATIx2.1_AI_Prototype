@@ -1,48 +1,56 @@
 import pandas as pd
 import numpy as np
 import pickle
+from sklearn.metrics.pairwise import cosine_similarity
 
 print("=" * 80)
-print("VKM SMART STUDY COACH - AI INFERENCE ENGINE")
+print("VKM SMART STUDY COACH - STUDENT-TO-MODULE RECOMMENDER")
 print("=" * 80)
 
-# Load het getrainde model
+# Load model
 print("\n[1] Model laden...")
-with open('vkm_recommender_model.pkl', 'rb') as f:
+with open('vkm_student_recommender_model.pkl', 'rb') as f:
     model = pickle.load(f)
 
-print("Model geladen")
+print(f"Model geladen: {model['model_version']}")
 print(f"  - {len(model['dataframe'])} modules beschikbaar")
-print(f"  - {model['similarity_matrix'].shape[0]}x{model['similarity_matrix'].shape[1]} similarity matrix")
-
-# Load de volledige dataset voor details
-df_full = pd.read_csv('VKM_processed_with_clusters.csv')
+print(f"  - TF-IDF matrix: {model['tfidf_matrix'].shape}")
 
 
-class VKMRecommender:
-    """AI-gestuurd VKM Aanbevelingssysteem"""
+class StudentToModuleRecommender:
+    """AI-gestuurd Student-to-Module Aanbevelingssysteem"""
     
-    def __init__(self, model_artefacten, volledig_dataframe):
-        self.similarity_matrix = model_artefacten['similarity_matrix']
-        self.df = volledig_dataframe
-        self.df_mini = model_artefacten['dataframe']
+    def __init__(self, model_artifacts):
+        self.tfidf_vectorizer = model_artifacts['tfidf_vectorizer']
+        self.tfidf_matrix = model_artifacts['tfidf_matrix']
+        self.df = model_artifacts['dataframe']
         
-    def get_recommendations(self, module_index, top_n=5, filters=None):
+    def recommend_for_student(self, student_text, top_n=5, filters=None, explain=True):
         """
-        Geeft aanbevelingen op basis van de index van een module.
+        Geeft module-aanbevelingen voor een student op basis van hun interesses.
         
         Parameters:
         -----------
-        module_index : int
-            De index van de module die als referentie dient.
+        student_text : str
+            Vrije tekst van de student over hun interesses (bijv. "Ik wil leren over data en AI")
         top_n : int
-            Het aantal aanbevelingen dat moet worden teruggegeven.
+            Aantal aanbevelingen
         filters : dict
-            Optionele filters om de resultaten te verfijnen (bijv. {'level': 'B', 'min_spots': 5}).
+            Optionele filters zoals {'level': 'NLQF5', 'min_credits': 3}
+        explain : bool
+            Geef uitleg waarom modules passen bij de student
+            
+        Returns:
+        --------
+        DataFrame met aanbevelingen en match scores
         """
-        similarities = self.similarity_matrix[module_index]
+        # STAP 1: Vectoriseer het studentprofiel met DEZELFDE TF-IDF vectorizer
+        student_vector = self.tfidf_vectorizer.transform([student_text.lower()])
         
-        # Filter de modules indien er filters zijn opgegeven
+        # STAP 2: Bereken cosine similarity tussen student en alle modules
+        similarities = cosine_similarity(student_vector, self.tfidf_matrix)[0]
+        
+        # STAP 3: Pas filters toe indien opgegeven
         valid_indices = np.arange(len(self.df))
         
         if filters:
@@ -50,183 +58,122 @@ class VKMRecommender:
             
             if 'level' in filters:
                 mask &= (self.df['level'] == filters['level']).values
-            if 'min_spots' in filters:
-                mask &= (self.df['available_spots'] >= filters['min_spots']).values
+            if 'min_credits' in filters:
+                mask &= (self.df['studycredit'] >= filters['min_credits']).values
             if 'max_difficulty' in filters:
                 mask &= (self.df['estimated_difficulty'] <= filters['max_difficulty']).values
-            if 'min_popularity' in filters:
-                mask &= (self.df['popularity_score'] >= filters['min_popularity']).values
                 
             valid_indices = np.where(mask)[0]
         
-        # Haal de meest vergelijkbare modules op (sluit de referentiemodule zelf uit)
-        valid_similarities = [(idx, similarities[idx]) for idx in valid_indices if idx != module_index]
+        # STAP 4: Sorteer op similarity score
+        valid_similarities = [(idx, similarities[idx]) for idx in valid_indices]
         valid_similarities.sort(key=lambda x: x[1], reverse=True)
         
+        # STAP 5: Haal top N modules op
         top_indices = [idx for idx, _ in valid_similarities[:top_n]]
-        
-        return self.df.iloc[top_indices]
-    
-    def get_recommendations_by_profile(self, student_profile, top_n=5):
-        """
-        Geeft aanbevelingen op basis van een studentenprofiel.
-
-        Parameters:
-        -----------
-        student_profile : dict
-            Een dictionary met studentkenmerken, bijv:
-            {'interests': ['data', 'ai'], 'preferred_difficulty': 3, 'level': 'B'}
-        """
-        eps = 1e-8  # Een kleine waarde om deling door nul te voorkomen
-        n = len(self.df)
-        scores = np.zeros(n)
-
-        # Stap 1: Match op basis van interesses (trefwoorden)
-        interest_counts = np.zeros(n, dtype=float)
-        if 'interests' in student_profile and student_profile['interests']:
-            interests = [s.lower() for s in student_profile['interests']]
-            for idx, combined in enumerate(self.df['combined_text'].fillna('').astype(str)):
-                cnt = sum(1 for it in interests if it in combined.lower())
-                interest_counts[idx] = cnt
-        # Normaliseer de interesse-scores naar een schaal van 0-1
-        ic_min, ic_max = interest_counts.min(), interest_counts.max()
-        if ic_max - ic_min > 0:
-            ic_norm = (interest_counts - ic_min) / (ic_max - ic_min + eps)
-        else:
-            ic_norm = interest_counts  # Allemaal nullen als er geen verschil is
-        scores += ic_norm * 2.0  # Geef extra gewicht aan trefwoord-matches (aanpasbaar)
-
-        # Stap 2: Match op basis van gewenste moeilijkheidsgraad
-        if 'preferred_difficulty' in student_profile:
-            pref_diff = student_profile['preferred_difficulty']
-            # Bereken de score: 1 min de absolute afwijking van de voorkeur
-            diff_scores = 1 - np.abs(self.df['estimated_difficulty'].fillna(pref_diff).values - pref_diff) / 5
-            diff_scores = np.clip(diff_scores, 0, 1) # Zorg dat de score tussen 0 en 1 blijft
-            scores += diff_scores * 1.0 # Gewicht voor moeilijkheid (aanpasbaar)
-
-        # Stap 3: Match op basis van niveau
-        if 'level' in student_profile:
-            level_match = (self.df['level'] == student_profile['level']).astype(int).values
-            scores += level_match * 1.5 # Geef extra gewicht als het level overeenkomt (aanpasbaar)
-
-        # Stap 4: Gebruik de opgeslagen populariteits- en interesse-scores
-        # Normaliseer deze scores ook naar een schaal van 0-1 voor een eerlijke vergelijking
-        pop = self.df['popularity_score'].fillna(0).astype(float).values
-        pop_min, pop_max = pop.min(), pop.max()
-        pop_norm = (pop - pop_min) / (pop_max - pop_min + eps)
-
-        ims = self.df['interests_match_score'].fillna(0).astype(float).values
-        ims_min, ims_max = ims.min(), ims.max()
-        ims_norm = (ims - ims_min) / (ims_max - ims_min + eps)
-
-        # Voeg de genormaliseerde scores toe aan de totaalscore met hun eigen gewichten
-        scores += ims_norm * 0.5
-        scores += pop_norm * 0.3
-
-        # Haal de top N modules met de hoogste totaalscores op
-        top_indices = scores.argsort()[-top_n:][::-1]
-
         results = self.df.iloc[top_indices].copy()
-        results['match_score'] = scores[top_indices]
-
+        results['match_score'] = [similarities[idx] for idx in top_indices]
+        
+        # STAP 6: Voeg uitleg toe (waarom past deze module?)
+        if explain:
+            results['explanation'] = results.apply(
+                lambda row: self._explain_match(student_text, row, student_vector),
+                axis=1
+            )
+        
         return results
     
+    def _explain_match(self, student_text, module_row, student_vector):
+        """Genereert intelligente uitleg waarom een module past bij de student"""
+        
+        # Categoriseer het type match op basis van context
+        student_lower = student_text.lower()
+        module_desc = module_row['combined_text'].lower()
+        module_name = module_row['name'].lower()
+        
+        # Detecteer interessegebieden in studentprofiel
+        is_tech = any(term in student_lower for term in ['data', 'ai', 'programm', 'software', 'technolog', 'python', 'machine learning'])
+        is_social = any(term in student_lower for term in ['psycholog', 'coach', 'zorg', 'mensen', 'welzijn', 'sociaal'])
+        is_business = any(term in student_lower for term in ['bedrijf', 'management', 'marketing', 'ondernemen', 'strategie'])
+        is_creative = any(term in student_lower for term in ['design', 'creatief', 'kunst', 'media', 'communicatie'])
+        
+        # Detecteer overeenkomstige focus in module
+        module_tech = any(term in module_desc or term in module_name for term in ['data', 'ai', 'software', 'programm', 'ict', 'technolog'])
+        module_social = any(term in module_desc or term in module_name for term in ['psycholog', 'coach', 'zorg', 'welzijn', 'sociaal'])
+        module_business = any(term in module_desc or term in module_name for term in ['bedrijf', 'management', 'marketing', 'ondernemen'])
+        module_creative = any(term in module_desc or term in module_name for term in ['design', 'creatief', 'communicatie', 'media'])
+        
+        # Genereer contextuele uitleg
+        if is_tech and module_tech:
+            return "Past bij je interesse in technologie en data-analyse"
+        elif is_social and module_social:
+            return "Sluit aan bij je motivatie om met mensen te werken"
+        elif is_business and module_business:
+            return "Bereidt je voor op zakelijke en strategische rollen"
+        elif is_creative and module_creative:
+            return "Ontwikkelt je creatieve en communicatieve vaardigheden"
+        elif module_row['popularity_score'] > 7:
+            return "Populaire module die goed aansluit bij je profiel"
+        elif module_row['estimated_difficulty'] <= 3:
+            return "Toegankelijke module om je interesses te verkennen"
+        else:
+            return f"Relevante {module_row['level']} module voor jouw ontwikkeling"
+    
+    def batch_recommend(self, student_texts, top_n=3):
+        """Geef aanbevelingen voor meerdere studenten tegelijk"""
+        results = {}
+        for i, text in enumerate(student_texts):
+            results[f"Student_{i+1}"] = self.recommend_for_student(text, top_n=top_n, explain=False)
+        return results
 
-    def get_cluster_recommendations(self, cluster_id, top_n=5):
-        """Geeft de topmodules uit een specifiek cluster, gesorteerd op een gewogen score."""
-        cluster_modules = self.df[self.df['cluster'] == cluster_id].copy()
-        
-        eps = 1e-8 # Kleine waarde om deling door nul te voorkomen
-        # Gebruik de min/max van de *gehele* dataset voor een eerlijke normalisatie
-        pop_min = self.df['popularity_score'].min()
-        pop_max = self.df['popularity_score'].max()
-        int_min = self.df['interests_match_score'].min()
-        int_max = self.df['interests_match_score'].max()
-        
-        # Normaliseer populariteit en interesse-match score naar een schaal van 0-1
-        cluster_modules['pop_norm'] = (cluster_modules['popularity_score'] - pop_min) / (pop_max - pop_min + eps)
-        cluster_modules['int_norm'] = (cluster_modules['interests_match_score'] - int_min) / (int_max - int_min + eps)
-        
-        # Pas gewichten toe om een eindscore te berekenen (deze zijn aanpasbaar)
-        cluster_modules['score'] = cluster_modules['pop_norm'] * 0.5 + cluster_modules['int_norm'] * 0.5
-        
-        # Geef de N modules met de hoogste score terug
-        return cluster_modules.nlargest(top_n, 'score')
 
-
-# Initialiseer de recommender
+# Initialiseer recommender
 print("\n[2] Recommender initialiseren...")
-recommender = VKMRecommender(model, df_full)
-print("Recommender is klaar voor gebruik")
+recommender = StudentToModuleRecommender(model)
+print("Recommender gereed!")
 
-# DEMO 1: Content-based aanbevelingen (op basis van vergelijkbare modules)
+# DEMO 1: Student met interesse in data & AI
 print("\n" + "=" * 80)
-print("DEMO 1: CONTENT-BASED AANBEVELINGEN")
+print("DEMO 1: STUDENT GEÏNTERESSEERD IN DATA & AI")
 print("=" * 80)
 
-# Kies een willekeurige module als uitgangspunt
-base_idx = 10
-base_module = df_full.iloc[base_idx]
+student_1 = """
+Ik ben geïnteresseerd in data analyse, machine learning en kunstmatige intelligentie.
+Ik wil graag leren programmeren in Python en werken met datasets.
+"""
 
-print(f"\n Gekozen basismodule:")
-print(f"   Naam: {base_module['name']}")
-print(f"   Level: {base_module['level']} | Studiepunten: {base_module['studycredit']}")
-print(f"   Moeilijkheid: {base_module['estimated_difficulty']}/5")
-print(f"   Populariteit: {base_module['popularity_score']:.2f}")
+print(f"\nStudentprofiel:\n{student_1.strip()}")
+print("\n Top 5 aanbevelingen:")
 
-print(f"\n Top 5 meest vergelijkbare modules:")
-recommendations = recommender.get_recommendations(base_idx, top_n=5)
+recommendations_1 = recommender.recommend_for_student(student_1, top_n=5)
 
-for i, (idx, module) in enumerate(recommendations.iterrows(), 1):
-    similarity = model['similarity_matrix'][base_idx][idx]
+for i, (idx, module) in enumerate(recommendations_1.iterrows(), 1):
     print(f"\n{i}. {module['name']}")
-    print(f"   Gelijkenis-score: {similarity:.3f}")
-    print(f"   Level: {module['level']} | Studiepunten: {module['studycredit']}")
-    print(f"   Moeilijkheid: {module['estimated_difficulty']}/5 | Populariteit: {module['popularity_score']:.2f}")
+    print(f"   Match score: {module['match_score']:.3f}")
+    print(f"   Level: {module['level']} | Credits: {module['studycredit']} | Locatie: {module['location']}")
+    print(f"   Moeilijkheid: {module['estimated_difficulty']:.1f}/5")
+    print(f"   → {module['explanation']}")
+    if 'shortdescription' in module:
+        desc = str(module['shortdescription'])[:100]
+        print(f"   Omschrijving: {desc}...")
 
-# DEMO 2: Profiel-gebaseerde aanbevelingen
+# DEMO 2: Student met interesse in psychologie & coaching
 print("\n" + "=" * 80)
-print("DEMO 2: PROFIEL-GEBASEERDE AANBEVELINGEN")
+print("DEMO 2: STUDENT GEÏNTERESSEERD IN PSYCHOLOGIE & COACHING")
 print("=" * 80)
 
-student_profile = {
-    'interests': ['data', 'analyse', 'machine learning', 'AI'],
-    'preferred_difficulty': 3,
-    'level': 'NLQF5'
-}
+student_2 = """
+Ik ben geïnteresseerd in psychologie, coaching en zorg.
+Ik wil graag werken met mensen en hen helpen groeien.
+"""
 
-print(f"\n Studentenprofiel:")
-print(f"   Interesses: {', '.join(student_profile['interests'])}")
-print(f"   Gewenste moeilijkheid: {student_profile['preferred_difficulty']}/5")
-print(f"   Niveau: {student_profile['level']}")
+print(f"\nStudentprofiel:\n{student_2.strip()}")
+print("\n Top 5 aanbevelingen:")
 
-print(f"\n Top 5 aanbevelingen voor dit profiel:")
-profile_recs = recommender.get_recommendations_by_profile(student_profile, top_n=5)
+recommendations_2 = recommender.recommend_for_student(student_2, top_n=5)
 
-for i, (idx, module) in enumerate(profile_recs.iterrows(), 1):
+for i, (idx, module) in enumerate(recommendations_2.iterrows(), 1):
     print(f"\n{i}. {module['name']}")
-    print(f"   Match-score: {module['match_score']:.2f}")
-    print(f"   Level: {module['level']} | Studiepunten: {module['studycredit']}")
-    print(f"   Moeilijkheid: {module['estimated_difficulty']}/5 | Populariteit: {module['popularity_score']:.2f}")
-    print(f"   Locatie: {module['location']}")
-
-# DEMO 3: Cluster-gebaseerde aanbevelingen
-print("\n" + "=" * 80)
-print("DEMO 3: CLUSTER-GEBASEERDE AANBEVELINGEN")
-print("=" * 80)
-
-cluster_id = 2
-print(f"\n Populairste modules uit Cluster {cluster_id}:")
-
-cluster_recs = recommender.get_cluster_recommendations(cluster_id, top_n=5)
-
-for i, (idx, module) in enumerate(cluster_recs.iterrows(), 1):
-    print(f"\n{i}. {module['name']}")
-    print(f"   Gewogen score: {module['score']:.2f}")
-    print(f"   Level: {module['level']} | Studiepunten: {module['studycredit']}")
-    print(f"   Moeilijkheid: {module['estimated_difficulty']}/5 | Populariteit: {module['popularity_score']:.2f}")
-
-print("\n" + "=" * 80)
-print(" INFERENCE VOLTOOID")
-print("=" * 80)
-print("\nHet model kan nu gebruikt worden voor real-time aanbevelingen!")
+    print(f"   Match score: {module['match_score']:.3f}")
+    print(f"   Level: {module['level']} | Credits: {module['studycredit']}")
+    print(f"   → {module['explanation']}")
