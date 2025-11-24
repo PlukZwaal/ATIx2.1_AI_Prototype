@@ -27,30 +27,54 @@ class StudentToModuleRecommender:
         
     def recommend_for_student(self, student_text, top_n=5, filters=None, explain=True):
         """
-        Geeft module-aanbevelingen voor een student op basis van hun interesses.
+        Hybride aanbevelingen: TF-IDF similarity + numerieke feature bonussen
         
         Parameters:
         -----------
         student_text : str
-            Vrije tekst van de student over hun interesses (bijv. "Ik wil leren over data en AI")
+            Vrije tekst van student over interesses
         top_n : int
             Aantal aanbevelingen
         filters : dict
-            Optionele filters zoals {'level': 'NLQF5', 'min_credits': 3}
+            Optionele filters {'level': 'NLQF5', 'min_credits': 3}
         explain : bool
-            Geef uitleg waarom modules passen bij de student
+            Geef uitleg waarom modules passen
             
         Returns:
         --------
         DataFrame met aanbevelingen en match scores
         """
-        # STAP 1: Vectoriseer het studentprofiel met DEZELFDE TF-IDF vectorizer
+        # STAP 1: TF-IDF Content Similarity (basis)
         student_vector = self.tfidf_vectorizer.transform([student_text.lower()])
+        content_similarities = cosine_similarity(student_vector, self.tfidf_matrix)[0]
         
-        # STAP 2: Bereken cosine similarity tussen student en alle modules
-        similarities = cosine_similarity(student_vector, self.tfidf_matrix)[0]
+        # STAP 2: Hybride Scoring - Combineer content met numerieke features
+        # Initialiseer scores met content similarity (gewicht: 60%)
+        scores = content_similarities * 0.6
         
-        # STAP 3: Pas filters toe indien opgegeven
+        # Bonus 1: Popularity Score (gewicht: 15%)
+        if 'popularity_score' in self.df.columns:
+            popularity_normalized = self.df['popularity_score'].fillna(0) / 10.0  # Schaal naar 0-1
+            scores += popularity_normalized.values * 0.15
+        
+        # Bonus 2: Interests Match Score (gewicht: 15%)
+        if 'interests_match_score' in self.df.columns:
+            interests_normalized = self.df['interests_match_score'].fillna(0) / 10.0
+            scores += interests_normalized.values * 0.15
+        
+        # Bonus 3: Difficulty Penalty/Bonus (gewicht: 10%)
+        # Als student expliciet difficulty noemt, match daarop
+        student_lower = student_text.lower()
+        if any(term in student_lower for term in ['makkelijk', 'eenvoudig', 'beginners']):
+            # Beloon lage difficulty
+            difficulty_bonus = (5 - self.df['estimated_difficulty'].fillna(3)) / 5.0
+            scores += difficulty_bonus.values * 0.10
+        elif any(term in student_lower for term in ['uitdagend', 'advanced', 'gevorderd']):
+            # Beloon hoge difficulty
+            difficulty_bonus = self.df['estimated_difficulty'].fillna(3) / 5.0
+            scores += difficulty_bonus.values * 0.10
+        
+        # STAP 3: Pas filters toe
         valid_indices = np.arange(len(self.df))
         
         if filters:
@@ -65,45 +89,62 @@ class StudentToModuleRecommender:
                 
             valid_indices = np.where(mask)[0]
         
-        # STAP 4: Sorteer op similarity score
-        valid_similarities = [(idx, similarities[idx]) for idx in valid_indices]
-        valid_similarities.sort(key=lambda x: x[1], reverse=True)
+        # STAP 4: Sorteer op hybride scores
+        valid_scores = [(idx, scores[idx]) for idx in valid_indices]
+        valid_scores.sort(key=lambda x: x[1], reverse=True)
         
         # STAP 5: Haal top N modules op
-        top_indices = [idx for idx, _ in valid_similarities[:top_n]]
+        top_indices = [idx for idx, _ in valid_scores[:top_n]]
         results = self.df.iloc[top_indices].copy()
-        results['match_score'] = [similarities[idx] for idx in top_indices]
+        results['match_score'] = [scores[idx] for idx in top_indices]
+        results['content_similarity'] = [content_similarities[idx] for idx in top_indices]
         
-        # STAP 6: Voeg uitleg toe (waarom past deze module?)
+        # STAP 6: Voeg uitleg toe
         if explain:
             results['explanation'] = results.apply(
-                lambda row: self._explain_match(student_text, row, student_vector),
+                lambda row: self._explain_match(student_text, row),
                 axis=1
             )
         
         return results
     
-    def _explain_match(self, student_text, module_row, student_vector):
-        """Genereert intelligente uitleg waarom een module past bij de student"""
-        
-        # Categoriseer het type match op basis van context
+    def _explain_match(self, student_text, module_row):
+        """
+        Genereert contextuele uitleg waarom een module past bij de student.
+        Verbeterd: veilige checks, duidelijkere logica, geen ontbrekende kolommen.
+        """
         student_lower = student_text.lower()
-        module_desc = module_row['combined_text'].lower()
-        module_name = module_row['name'].lower()
         
-        # Detecteer interessegebieden in studentprofiel
-        is_tech = any(term in student_lower for term in ['data', 'ai', 'programm', 'software', 'technolog', 'python', 'machine learning'])
-        is_social = any(term in student_lower for term in ['psycholog', 'coach', 'zorg', 'mensen', 'welzijn', 'sociaal'])
-        is_business = any(term in student_lower for term in ['bedrijf', 'management', 'marketing', 'ondernemen', 'strategie'])
-        is_creative = any(term in student_lower for term in ['design', 'creatief', 'kunst', 'media', 'communicatie'])
+        # Veilig ophalen van module-tekst
+        module_name = str(module_row.get('name', '')).lower()
+        module_desc = str(module_row.get('combined_text', '')).lower()
         
-        # Detecteer overeenkomstige focus in module
-        module_tech = any(term in module_desc or term in module_name for term in ['data', 'ai', 'software', 'programm', 'ict', 'technolog'])
-        module_social = any(term in module_desc or term in module_name for term in ['psycholog', 'coach', 'zorg', 'welzijn', 'sociaal'])
-        module_business = any(term in module_desc or term in module_name for term in ['bedrijf', 'management', 'marketing', 'ondernemen'])
-        module_creative = any(term in module_desc or term in module_name for term in ['design', 'creatief', 'communicatie', 'media'])
+        # Combineer voor efficiënter zoeken
+        module_text = f"{module_name} {module_desc}"
         
-        # Genereer contextuele uitleg
+        # Definieer keyword-categorieën
+        tech_keywords = ['data', 'ai', 'programm', 'software', 'technolog', 'python', 
+                        'machine learning', 'algoritme', 'ict']
+        social_keywords = ['psycholog', 'coach', 'zorg', 'mensen', 'welzijn', 
+                        'sociaal', 'maatschappelijk']
+        business_keywords = ['bedrijf', 'management', 'marketing', 'ondernemen', 
+                            'strategie', 'financiën']
+        creative_keywords = ['design', 'creatief', 'kunst', 'media', 'communicatie',
+                            'visueel']
+        
+        # Detecteer interessegebieden
+        is_tech = any(kw in student_lower for kw in tech_keywords)
+        is_social = any(kw in student_lower for kw in social_keywords)
+        is_business = any(kw in student_lower for kw in business_keywords)
+        is_creative = any(kw in student_lower for kw in creative_keywords)
+        
+        # Detecteer module-focus
+        module_tech = any(kw in module_text for kw in tech_keywords)
+        module_social = any(kw in module_text for kw in social_keywords)
+        module_business = any(kw in module_text for kw in business_keywords)
+        module_creative = any(kw in module_text for kw in creative_keywords)
+        
+        # Genereer contextuele uitleg (match eerst op domein)
         if is_tech and module_tech:
             return "Past bij je interesse in technologie en data-analyse"
         elif is_social and module_social:
@@ -112,12 +153,20 @@ class StudentToModuleRecommender:
             return "Bereidt je voor op zakelijke en strategische rollen"
         elif is_creative and module_creative:
             return "Ontwikkelt je creatieve en communicatieve vaardigheden"
-        elif module_row['popularity_score'] > 7:
+        
+        # Fallback op numerieke features (veilig met .get())
+        popularity = module_row.get('popularity_score', 0)
+        difficulty = module_row.get('estimated_difficulty', 3)
+        
+        if popularity > 7:
             return "Populaire module die goed aansluit bij je profiel"
-        elif module_row['estimated_difficulty'] <= 3:
+        elif difficulty <= 2:
             return "Toegankelijke module om je interesses te verkennen"
+        elif difficulty >= 4:
+            return "Uitdagende module voor ambitieuze studenten"
         else:
-            return f"Relevante {module_row['level']} module voor jouw ontwikkeling"
+            level = module_row.get('level', 'onbekend')
+            return f"Relevante {level}-module voor jouw ontwikkeling"
     
     def batch_recommend(self, student_texts, top_n=3):
         """Geef aanbevelingen voor meerdere studenten tegelijk"""
@@ -153,9 +202,8 @@ for i, (idx, module) in enumerate(recommendations_1.iterrows(), 1):
     print(f"   Level: {module['level']} | Credits: {module['studycredit']} | Locatie: {module['location']}")
     print(f"   Moeilijkheid: {module['estimated_difficulty']:.1f}/5")
     print(f"   → {module['explanation']}")
-    if 'shortdescription' in module:
-        desc = str(module['shortdescription'])[:100]
-        print(f"   Omschrijving: {desc}...")
+    desc = str(module.get('shortdescription', 'Geen beschrijving'))[:100]
+    print(f"   Omschrijving: {desc}...")
 
 # DEMO 2: Student met interesse in psychologie & coaching
 print("\n" + "=" * 80)
