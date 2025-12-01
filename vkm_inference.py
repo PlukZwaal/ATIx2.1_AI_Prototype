@@ -55,23 +55,46 @@ class StudentToModuleRecommender:
         return results[['name', 'level', 'studycredit', 'location', 'match_score', 'explanation']]
 
     def _explain(self, row, student_text):
+        # Nederlandse stopwoorden (klein lijstje is genoeg)
+        dutch_stopwords = {'de', 'het', 'een', 'en', 'van', 'in', 'op', 'met', 'voor', 'te', 'is', 'ik', 'je', 'mijn',
+                           'aan', 'uit', 'over', 'door', 'bij', 'als', 'wat', 'wie', 'hoe', 'niet', 'wel', 'dan',
+                           'of', 'maar', 'toch', 'ook', 'nog', 'al', 'alleen', 'zo', 'ze', 'zij', 'hij'}
+
+        # Student woorden (zonder stopwoorden en leestekens)
+        student_words = {w.lower() for w in student_text.replace(',', ' ').replace('.', ' ').split()
+                        if len(w) > 2 and w.lower() not in dutch_stopwords}
+
+        # Module woorden (naam + korte beschrijving + tags)
+        module_text = f"{row['name']} {row.get('shortdescription','')} {row.get('module_tags','')}".lower()
+        module_words = {w for w in module_text.replace(',', ' ').replace('.', ' ').split()
+                       if len(w) > 2 and w not in dutch_stopwords}
+
+        # Overlappende inhoudelijke woorden
+        overlap = student_words.intersection(module_words)
+
+        if len(overlap) >= 2:
+            top_words = sorted(overlap)[:5]
+            return f"Sterke match op: {', '.join(top_words)}"
+
+        if len(overlap) == 1:
+            return f"Match op woord: {list(overlap)[0]}"
+
+        # Fallback: domein-herkenning (zoals je al had)
         text = student_text.lower()
-        module = f"{row['name']} {row.get('shortdescription', '')}".lower()
 
-        # Correcte syntax: == in plaats van =
-        any_ai = any(k in text for k in ['ai', 'machine learning', 'python', 'data', 'programmeren'])
-        any_zorg = any(k in text for k in ['zorg', 'psycholog', 'coach', 'mensen helpen', 'welzijn'])
-        any_business = any(k in text for k in ['business', 'ondernemen', 'marketing', 'finance', 'bedrijf'])
+        if any(k in text for k in ['ai', 'machine learning', 'python', 'data', 'programmeren', 'deep learning']):
+            return "Perfecte match met je interesse in AI & data!"
 
-        if any_ai and any(k in module for k in ['ai', 'data', 'python', 'machine learning', 'intelligentie']):
-            return "Perfecte match met je interesse in technologie & data!"
-        if any_zorg and any(k in module for k in ['zorg', 'psycholog', 'coaching', 'welzijn']):
+        if any(k in text for k in ['zorg', 'psychologie', 'coaching', 'mensen helpen', 'welzijn', 'patiënt']):
             return "Ideaal voor jouw wens om mensen te helpen"
-        if any_business and any(k in module for k in ['business', 'ondernem', 'marketing', 'finance']):
+
+        if any(k in text for k in ['ondernemen', 'business', 'marketing', 'bedrijf', 'sales', 'startup']):
             return "Super voor je ondernemersambities!"
+
         if row['popularity_norm'] > 0.8:
-            return "Zeer populaire module onder studenten"
-        return "Goede algemene match met jouw profiel"
+            return "Zeer populaire module bij medestudenten"
+
+        return "Goede algemene match met jouw interesses"
 
 # Start recommender
 recommender = StudentToModuleRecommender(model)
